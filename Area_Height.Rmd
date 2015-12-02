@@ -1,0 +1,204 @@
+---
+title: "Area_Height_Analysis"
+author: "Steve Rolfe"
+date: "5 November 2015"
+output: html_document
+---
+
+Standard code to clear the system and install required libraries
+```{r}
+rm(list=ls())
+library(ggplot2)
+library(lubridate)
+library(dplyr)
+library(zoo)
+```
+
+Set up standard files names and the subset to plot
+```{r}
+setwd("C:/Users/Steve Rolfe/Google Drive/Phenomics/Area_Height")
+input_file="./data/BR7_area_ht.csv"
+plant_codes="./data/BR7_plant_codes.csv"
+
+output_file="./output/BR7_area_ht_output.csv"
+
+
+#subset of data to plot using grep format
+#sset<-"BR7-0[1]1[1][1-4]"
+sset<-"BR7-0[1-5]1[1-3][1-4]"
+```
+
+We use a rolling average to smooth out the noise - this sets the window size for this average
+To calculate the maximum value we use a larger window
+Finally we set the tolerance of how close a value has to be to this maximum to be the maximum
+```{R}
+#rolling window size - for the rolling average of water data
+wsz<-3
+#maximum window size - for the number of points from which to calculate the maximum
+msz<-3
+#how close to the maximum value does a value have to be to be counted as a maximum
+csz<-0.95
+```
+
+Set up standard headers for the files - these need to be edited to be consistent
+The BR codes are suppled by IBERS but we should include the ASSYT codes where possible
+Standard headers should be
+BR_code,date_time, measurements (with informative names)
+Custom code will be needed to translate the BR_codes into useful information
+
+Read in the data and check that the required headers are there
+```{r}
+#read in the data
+htdata<-read.csv(input_file,header=TRUE,stringsAsFactors = FALSE)
+if(is.object(htdata)==FALSE) {stop(c("Can't open file:",input_file))}
+
+#check that there the required headings are there and throw an error if not
+if(is.na(match("BR_code",colnames(htdata)))){stop("BR_code missing from input file header")}
+if(is.na(match("date_time",colnames(htdata)))){stop("date_time missing from input file header")}
+head(htdata)
+
+#this file contains info about the plants used
+plant_codes<-read.csv(plant_codes,header = TRUE,stringsAsFactors = FALSE)
+if(is.object(plant_codes)==FALSE) {stop(c("Can't open file:",plant_codes))}
+```
+
+We  deal with any specific coding here about names of plants, spores etc.
+Use the file plant_codes to keep the information organised
+```{r}
+#dpi offset from first data point
+#it's good to express everything as dpi but 1st data point might not be dpi
+#set the date of infection
+dpi_datetime<-"2015-7-6 00:00:00"
+
+#now set the factors manually
+htdata$BR_code<-as.factor(htdata$BR_code)
+
+#and set the plants,spores,etc
+#the plant code is the sixth character in the BR7 string
+htdata$plant<-as.factor(substr(htdata$BR_code,6,6))
+#the spore concentration code is the 8th character
+htdata$spore<-as.factor(substr(htdata$BR_code,8,8))
+#the repeat is the 9th
+htdata$rep<-as.factor(substr(htdata$BR_code,9,9))
+head(htdata)
+
+#now merge the plant names with the data frame
+htdata<-merge(htdata,plant_codes,by.x="plant",by.y="plant_code")
+head(htdata)
+
+#now do some standard time processing
+#use difftime to get the days since inoculation
+htdata$dpi<-as.numeric(difftime(htdata$date_time,dpi_datetime,units="days"))
+```
+
+Always use a subset function to keep things under control for plotting
+
+```{R}
+subdata<-subset(htdata,grepl(sset,htdata$BR_code))
+subdata<-droplevels(subdata)
+#there's a lot of missing data (with NAs) so get rid
+subdata<-na.omit(subdata)
+```
+
+Now plot the basic data
+```{R}
+head(subdata)
+#plot the raw height data as a line
+p1<-ggplot(data=subdata,aes(x=dpi,y=Plant_height_mm,color=spore,group=BR_code))+geom_line()
+p1<-p1+scale_y_continuous(name="Height mm")
+p1<-p1+facet_wrap(~plant_name)
+p1
+
+#plot the area
+p2<-ggplot(data=subdata,aes(x=dpi,y=Area_mm2,color=spore,group=BR_code))+geom_line()
+p2<-p2+scale_y_continuous(name="Area mm2")
+p2<-p2+facet_wrap(~plant_name)
+p2
+```
+
+Try a rolling average for the area data
+```{R}
+#sort the data so that the rolling means and cumulative values are correct
+subdata<-subdata[with(subdata,order(BR_code,dpi)),]
+#get the rolling average by group (window = wsz)
+subdata$area_ravg<-ave(subdata$Area_mm2,subdata$BR_code,FUN=function(x) rollmean(x,k=wsz,fill = NA,na.pad=T))
+head(subdata)
+
+p2<-ggplot(data=subdata,aes(x=dpi,y=Area_mm2,color=spore,group=BR_code))+geom_point()
+p2<-p2+geom_line(data=subdata,aes(x=dpi,y=area_ravg,colour=spore,group=BR_code))
+p2<-p2+scale_y_continuous(name="Maximum Area mm2")
+p2<-p2+facet_wrap(~plant_name)
+p2
+```
+
+Now get some parameters from the data
+```{R}
+#get the maximum values  - sort by area rolling average
+sort_subdata<-subdata[order(subdata$BR_code,subdata$area_ravg,na.last=TRUE,decreasing=TRUE),]
+#create a vector to hold data by groups
+grp<-group_by(sort_subdata,BR_code)
+#get the mean of the msz th largest values
+d<-summarise(grp,area_mean_ravg=mean(area_ravg[1:msz],na.rm=TRUE))
+d
+#merge
+subdata<-merge(subdata,d,by="BR_code")
+
+
+#plot the maximum area attained
+p2<-ggplot(subdata,aes(x=spore,area_mean_ravg))
+p2<-p2+geom_boxplot(aes(fill=spore),outlier.colour="red",outlier.size=3)
+p2<-p2+scale_y_continuous(name="Maximum area (mm2)")
+p2<-p2+facet_wrap(~plant_name)
+p2
+```
+
+However, the maximum area is not the final area when measurements were taken
+Get these as well
+```{R}
+#get the final values - sort on dpi
+sort_subdata<-subdata[order(subdata$BR_code,subdata$dpi,na.last =TRUE,decreasing=TRUE),]
+#create a vector to hold data by groups
+grp<-group_by(sort_subdata,BR_code)
+#get the mean of the msz th largest values
+e<-summarise(grp,area_mean_final=mean(Area_mm2[1:msz],na.rm=TRUE))
+e
+subdata<-merge(subdata,e,by="BR_code")
+
+#plot the maximum area attained
+p2<-ggplot(subdata,aes(x=spore,area_mean_final))
+p2<-p2+geom_boxplot(aes(fill=spore),outlier.colour="red",outlier.size=3)
+p2<-p2+scale_y_continuous(name="Final area (mm2)")
+p2<-p2+facet_wrap(~plant_name)
+p2
+```
+
+Compare the two different measurements
+```{R}
+e<-merge(e,d,by="BR_code")
+head(e)
+
+#now set the factors manually - it's a bit ugly to set these values again rather than read them from subdata!
+e$BR_code<-as.factor(e$BR_code)
+
+#and set the plants,spores,etc
+#the plant code is the sixth character in the BR7 string
+e$plant<-as.factor(substr(e$BR_code,6,6))
+#the spore concentration code is the 8th character
+e$spore<-as.factor(substr(e$BR_code,8,8))
+#the repeat is the 9th
+e$rep<-as.factor(substr(e$BR_code,9,9))
+head(e)
+
+#now merge the plant names with the data frame
+e<-merge(e,plant_codes,by.x="plant",by.y="plant_code")
+head(e)
+
+p3<-ggplot(e,aes(x=area_mean_final,y=area_mean_ravg))
+p3<-p3+geom_point(aes(colour=spore,shape=plant_name,size=10))
+p3<-p3+geom_smooth(method=lm)
+p3
+
+write.csv(e,file=output_file)
+```
+
+
